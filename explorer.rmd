@@ -1,0 +1,501 @@
+---
+title: "Data Explorer"
+output: 
+  flexdashboard::flex_dashboard:
+    storyboard: false
+    orientation: columns
+    runtime: shiny
+    css: flexstyle.css
+    vertical_layout: scroll
+    includes: 
+      after_body: "busy.html"
+---
+
+```{r setup, include=FALSE}
+library(flexdashboard)
+library(tidyverse)
+library(dplyr)
+library(dbplyr)
+library(DT)
+library(data.table)
+library(ggplot2)
+library(plotly)
+library(agdl)
+library(shiny)
+# Connect to the datalake
+con <- dl.new()
+dl.getPort(range = 6990:8000, random = TRUE)
+liveHours <- 2
+```
+
+
+Genome Info {data-icon="fa-dna"}
+================================================================
+
+Sidebar {.sidebar}
+----------------------------------------------------------------
+
+
+```{r sidebar-genome}
+## GET THE DATA
+safety_data <- tbl(con, in_schema("global_files", "genome_mining"))
+safety_df <- as.data.frame(safety_data)
+colnames(safety_df)[1] <- "sdf_index"
+trait_data <- tbl(con, in_schema("global_files", "genome_traits"))
+trait_df <- as.data.frame(trait_data)
+tdf <- trait_df %>%
+              separate(id, "_",  into=c('AssemblyID',
+                                        'GenomeID',
+                                        'OrganismID'), 
+                       remove=FALSE, extra='drop') %>%
+              gather('Mucin_binding',
+                     'Fibronectin_binding',
+                     'Collagen_binding',
+                     key = "target_gene", value = "hits")
+## Separate the Query column to create "Contig" and "Protein" columns
+sdf <- safety_df %>%
+  separate(Query, "_",  into=c('Contig','Protein'), remove=FALSE, extra='drop')
+sdf  <- sdf[!is.na(sdf$Contig), ]
+###### Detailed Data
+# Rename Organism ID
+  sdf$OrganismID <- sdf$organism_identifier
+  sdf$Hit_Type <- sdf$DatabaseType
+# Link to Assembly Info
+  sdf$Assembly <- sdf$AssemblyID
+  sdf$Assembly <- paste0("<a href='https://xxx.xxx.xxx/assembly/",
+                         sdf$Assembly,"' target='_blank'>",sdf$Assembly,"</a>")
+  tdf$Assembly <- tdf$AssemblyID
+  tdf$Assembly <- paste0("<a href='https://xxx.xxx.xxx/assembly/",
+                         tdf$Assembly,"' target='_blank'>",tdf$Assembly,"</a>")
+# Link to Genome Info
+  sdf$Genome <- sdf$GenomeID
+  sdf$Genome <- paste0("<a href='https://xxx.xxx.xxx/genome/",
+                         sdf$Genome,"' target='_blank'>",sdf$Genome,"</a>")
+  tdf$Genome <- tdf$GenomeID
+  tdf$Genome <- paste0("<a href='https://xxx.xxx.xxx/genome/",
+                         tdf$Genome,"' target='_blank'>",tdf$Genome,"</a>")
+                             
+  sdf <- sdf %>%
+       group_by(OrganismID)
+  
+  sdf_set <- sdf %>% select(
+                             "OrganismID",
+                             "Genome", 
+                             "Assembly",
+                             "Contig",
+                             "Protein",
+                             "Description",
+                             "DatabaseType",
+                             "DatabaseVersion",
+                             "Reference",
+                             "PercentID",
+                             "HitCoverage",
+                             "ReferenceCoverage",
+                             "evalue",
+                             "BUSCO_Compl",
+                             "BUSCO_Contam")
+  genomesafety_detail <- as.data.frame(sdf_set)
+  tdf <- tdf %>%
+         select("OrganismID",
+         "Genome",
+         "Assembly",
+         "target_gene",
+         "hits",
+         "organism_name",
+         "kraken",
+         "swap"
+         )
+  
+######## Summary Data
+## Summarize the data table by OrganismID and select the summary columns
+  gbo_set <-  sdf %>%
+              group_by(OrganismID, Contig) %>%
+              add_count(DatabaseType) %>% 
+              distinct(Contig, .keep_all = TRUE) %>%
+              spread(DatabaseType, n) %>%
+              replace_na(list(ICE = 0, RESF = 0, VFDB = 0, Bacteriocin = 0, Plasmid = 0)) %>%
+              group_by(O_Number) %>% 
+              summarize_at(vars(ICE, RESF, VFDB, Bacteriocin, Plasmid), funs(sum))
+         
+  
+  genomesafety_by_organism <- as.data.frame(gbo_set)
+  
+## Display the data table at the contig level
+  
+  gbc_set <- sdf %>%
+             group_by(OrganismID, Contig) %>%
+             add_count(DatabaseType) %>% 
+             spread(DatabaseType, n) %>% 
+             replace_na(list(ICE = 0, RESF = 0, VFDB = 0, Bacteriocin = 0, Plasmid = 0)) %>%
+             distinct(OrganismID, .keep_all = TRUE) %>%
+             select(
+                "OrganismID",
+                "Genome",
+                "Assembly",
+                "Contig",
+                "ICE",
+                "RESF",
+                "VFDB",
+                "Bacteriocin",
+                "Plasmid")
+  
+  genomesafety_by_contig <- as.data.frame(gbc_set)
+  
+### SEARCH FUNCTIONS
+## User specifies search criteria with a dropdown
+renderUI({
+        selectInput("searchOID","Search by OrganismID:", 
+        choices=sdf_set$OrganismID, 
+        multiple=TRUE, selectize=TRUE)
+  })
+ 
+# This generates a new summarized data table that is fitered on OrganismID, displayed by OrganismID
+  load_filtered_safety_summary_data <- function(search_o_sum) {
+    req(input$searchOID)
+    lfd <- genomesafety_by_organism %>% 
+           filter(OrganismID %in% search_o_sum)
+  }
+# This generates a new summarized data table that is fitered on OrganismID, displayed by contig
+  load_filtered_safety_summary_data_contig <- function(search_o_contig) {
+    req(input$searchID)
+    lfd <- genomesafety_by_contig %>% 
+           filter(OrganismID %in% search_o_contig)
+  }
+  
+# This generates a new data table that is fitered on OrganismID, displaying full details from the main table
+  load_filtered_safety_data_detail <- function(search_o_detail) {
+    req(input$searchOID)
+    lfd <- genomesafety_detail %>% 
+           filter(OrganismID %in% search_o_detail)
+  }
+  
+# This generates a new data table that is fitered on O-Number, displaying full details from the genome trait table
+  load_filtered_trait_data <- function(search_o_trait) {
+    req(input$searchOID)
+    lft <- tdf %>% 
+           filter(OrganismID %in% search_o_trait)  
+  }
+  
+```
+**Database Information:**
+
+- **ICE**: [ICEBerg2](http://db-mml.sjtu.edu.cn/ICEberg/)
+
+- **RESF**: [ResFinder](https://cge.cbs.dtu.dk/services/ResFinder/)
+
+- **VFDB**: [Virulence Factor DB](http://www.mgc.ac.cn/VFs/)
+
+- **Bacteriocin**: [Bagel4](http://bagel4.molgenrug.nl/index.php)
+
+- **Plasmid**: Protein database by RVKU
+
+Data for this tool was generated from the [Safety Assessment Notebook](https://xxx.xxx.xxx/c5a76ef6/Safety-Assessment-Notebook-V3?ref=2/10) by **RVKU**.
+        
+        
+Column {.tabset}
+----------------------------------------------------------------
+
+### Summarized Genome Hits
+
+
+```{r table-safety-onum_summary, echo=FALSE }
+# This code looks for a search tearm. If there is a search tearm, it will display the
+# load_filtered_safety_summary_data table. If there is no search tearm, it displays the
+# genomesafety_by_organism
+safety_summary_table  <- reactive({
+      if(isTruthy(input$searchOID)) {
+        observe(input$searchOID)
+        load_filtered_safety_summary_data(search_o_sum=input$searchOID)
+      } else {
+        genomesafety_by_organism
+      }
+  }) 
+#if(nrow(safety_summary_table()) == 0)
+#            return("No hits found")
+#############
+renderDT(safety_summary_table(), 
+         extensions = 'Buttons',
+         escape = FALSE,
+         options = list(rowCallback = JS(
+                   "function(row, data) {",
+                   "var full_text = 'This rows values are :' + data[0] + ',' + data[1] + '...'",
+                   "$('td', row).attr('title', full_text);",
+                   "}"),
+                   dom = "lBfrtip",
+                   buttons = c('csv', 'excel', 'pdf'),
+                   searching = FALSE)
+         )
+```
+
+### Summarized Hits by Contig
+
+
+```{r table-safety-contig_summary, echo=FALSE }
+# This code looks for a search tearm. If there is a search tearm, it will display the
+# load_filtered_safety_summary_data_contig table. If there is no search tearm, it displays
+# the genomesafety_by_contig table
+safety_summary_table_contig  <- reactive({
+      if(isTruthy(input$searchOID)) {
+        load_filtered_safety_summary_data_contig(search_o_contig=input$searchOID)
+      } else {
+        genomesafety_by_contig
+      }
+  }) 
+#############
+renderDT(safety_summary_table_contig(), 
+         extensions = 'Buttons',
+         options = list(dom = "lBfrtip",
+                        buttons = c('csv', 'excel', 'pdf'),
+                        searching = FALSE
+                        ),
+         escape = FALSE)
+```
+
+### Genome Hits Detail
+
+```{r table-safety}
+# This code looks for a search tearm. If there is a search tearm, it will display the
+# load_filtered_safety_data_detail table. If there is no search tearm, it displays
+# the genomesafety_detail table
+safety_table_detail  <- reactive({
+      if(isTruthy(input$searchOID)) {
+        load_filtered_safety_data_detail(search_o_detail=input$searchOID)
+      } else {
+        genomesafety_detail
+      }
+  }) 
+                                          
+## Render
+renderDT(safety_table_detail(), 
+         extensions = 'Buttons',
+         options = list(dom = "lBfrtip",
+                        buttons = c('csv', 'excel', 'pdf'),
+                        searching = FALSE
+                        ),
+         escape = FALSE)
+```
+
+### Genome Traits
+
+```{r table-traits}
+# This code looks for a search tearm. If there is a search tearm, it will display the
+# load_filtered_trait_data table. If there is no search tearm, it displays
+# the trait_data table
+trait_table_detail  <- reactive({
+      if(isTruthy(input$searchOID)) {
+        load_filtered_trait_data(search_o_trait=input$searchOID)
+      } else {
+        tdf
+      }
+  }) 
+#renderDT(allData)
+renderDT(trait_table_detail(),
+         extensions = 'Buttons',
+         options = list(dom = "Blfrtip",
+                        buttons = c('csv', 'excel', 'pdf'),
+                        searching = FALSE
+                        ),
+         escape = FALSE) 
+```
+
+
+Strain Selection {data-icon="fa-tasks"}
+================================================================
+
+Sidebar {.sidebar}
+----------------------------------------------------------------
+
+```{r sidebar-strain}
+## Select the schema from all schemas available to a user
+  renderUI({
+    selectInput("strainschemaSelection","Select Schema:",sort(dl.schemas()$schema_name),
+                selected = "")
+  }) 
+  
+## Select the table of interest in the schema
+  renderUI({
+    selectInput("straintableSelection","Select Assay or View:",sort(dl.tables(schema=input$strainschemaSelection)
+                                              $table_name),selected = "")
+  }) 
+  
+## User Selects X Axis
+  renderUI({
+        req(input$straintableSelection)
+        selectInput("strainxcolumnSelection","X Axis:", 
+                    dl.columns(table=input$straintableSelection, schema=input$strainschemaSelection),
+                    selected = "", multiple=FALSE)
+  })
+  
+## User Selects Y Axis
+  renderUI({
+        req(input$straintableSelection)
+        selectInput("strainycolumnSelection","Y Axis:", 
+                    dl.columns(table=input$straintableSelection, schema=input$strainschemaSelection),
+                    selected = "", multiple=FALSE)
+  })
+  
+## User Selects Coloring
+  renderUI({
+        req(input$straintableSelection)
+        selectInput("straincolorSelection","Color/Group by:", 
+                    dl.columns(table=input$straintableSelection, schema=input$strainschemaSelection),
+                    selected = "", multiple=FALSE)
+  })
+# Generate a dataframe of the table selected
+  load_strain_data <- function(strainschemaSelection, 
+                               straintableSelection, 
+                               strainxcolumnSelection, 
+                               strainycolumnSelection, 
+                               straincolorSelection) {
+    i <- dl.q(q=sprintf("select * from %s.%s", 
+                        input$strainschemaSelection, 
+                        input$straintableSelection)) %>% 
+          tibble::rownames_to_column() %>% 
+          filter_at(c(strainxcolumnSelection, strainycolumnSelection),
+                    all_vars(!is.na(.))) %>% 
+          distinct() 
+    i
+  }
+ 
+ 
+```
+        
+Column {.tabset}
+----------------------------------------------------------------
+
+### Scatter Plot
+
+```{r scatter-strain}
+## Data: This generates a dataframe (strain_m) that requires entries 
+## from the pull-down options in the sidebar, and renames
+## variables for ease of graphing.
+  strain_m  <- reactive({
+    validate(
+      need(input$straintableSelection, 'Check table is selected'),
+      need(input$strainxcolumnSelection, 'Please choose a x column.'),
+      need(input$strainycolumnSelection, 'Please choose a y column.')
+    )
+    load_strain_data(input$strainschemaSelection, 
+              input$straintableSelection, 
+              input$strainxcolumnSelection, 
+              input$strainycolumnSelection,
+              input$straincolorSelection) %>% 
+      mutate_(xx = input$strainxcolumnSelection, 
+              yy = input$strainycolumnSelection,
+              zz = input$straincolorSelection)
+  }) 
+## Function that calls for the type of plot  
+  strain_scatter_plot <- function(data, xx, yy, cc) {
+    ggplot(data, aes_string(x=xx, y=yy, color = cc)) + 
+    geom_point()
+  } 
+  
+## Reactive function that enters in the renamed variables from the 
+## strain_m dataframe and drops them in to the graph function  
+  sp_scatter <- reactive({
+    strain_scatter_plot(strain_m(), xx = input$strainxcolumnSelection, 
+            yy = input$strainycolumnSelection, 
+            cc = input$straincolorSelection) 
+  })
+# Plot the Graph
+  renderPlotly({
+    sp_scatter()
+  })
+```
+
+### Grouped Plots
+
+```{r group-strain}
+## Data: This generates a dataframe (strain_m) that requires entries 
+## from the pull-down options in the sidebar, and renames
+## variables for ease of graphing.
+  strain_m  <- reactive({
+    validate(
+      need(input$straintableSelection, 'Check table is selected'),
+      need(input$strainxcolumnSelection, 'Please choose a x column.'),
+      need(input$strainycolumnSelection, 'Please choose a y column.'),
+      need(input$straincolorSelection, 'Please choose the color grouping.')
+    )
+    load_strain_data(input$strainschemaSelection, 
+              input$straintableSelection, 
+              input$strainxcolumnSelection, 
+              input$strainycolumnSelection,
+              input$straincolorSelection) %>% 
+      mutate_(xx = input$strainxcolumnSelection, 
+              yy = input$strainycolumnSelection, 
+              zz = input$straincolorSelection)
+  }) 
+  
+## Function that calls for the type of plot  
+  strain_group_plot <- function(data, xx, yy, cc) {
+    ggplot(data, aes_string(x=xx, y=yy, color = cc)) + 
+    geom_boxplot()
+  } 
+  
+## Reactive function that enters in the renamed variables from the 
+## strain_m dataframe and drops them in to the graph function 
+  sp_group <- reactive({
+    strain_group_plot(strain_m(), xx = input$strainxcolumnSelection, 
+            yy = input$strainycolumnSelection, 
+            cc = input$straincolorSelection) 
+  })
+# Plot the Graph
+  plotOutput("plot")
+  output[["plot"]] <- renderPlotly({
+    sp_group()
+  })
+  
+```
+
+### Table of Plot Data
+
+```{r scatter-table}
+  
+## This table displays the strain_m dataframe so users can view the
+## actual data used to make the plots. This can be exported for use
+## with other visualization software.
+renderDataTable({
+  strain_m()
+}) 
+```
+
+Explore Data Tables {data-icon="fa-table"}
+================================================================
+
+Sidebar {.sidebar}
+----------------------------------------------------------------
+
+
+```{r data}
+## Select the schema from all schemas available to a user
+  renderUI({
+    selectInput("schemaSelection","Select Schema:",sort(dl.schemas()$schema_name),
+                selected = "global_files")
+  }) 
+  
+## Select the table of interest in the schema
+  renderUI({
+    selectInput("tableSelection","Select Assay or View:",sort(dl.tables(schema=input$schemaSelection)
+                $table_name),selected = "summary_data")
+  }) 
+# Generate a dataframe of the table selected
+  allData <- reactive({
+             results <- dl.q(q=sprintf("select * from %s.%s input$tableSelection", 
+                                       input$schemaSelection,
+                                       input$tableSelection))
+             as.data.frame(results)
+    })
+  
+  
+```
+        
+Column {.tabset}
+----------------------------------------------------------------
+
+### Data Table Overview
+```{r dataview}
+# Display the dataframe in a searchable and sortable data table
+renderDataTable({
+  allData()
+})
+```
